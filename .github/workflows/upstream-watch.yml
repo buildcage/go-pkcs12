@@ -1,0 +1,47 @@
+name: Upstream watch
+
+# Scheduled runs use the default branch, which is always the newest
+# buildcage/<upstream tag>, so its name says which upstream release this fork
+# is based on.
+on:
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-slim
+    steps:
+      - name: Open an issue for a newer upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base="${GITHUB_REF_NAME#buildcage/}"
+          if ! printf '%s\n' "$base" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::$GITHUB_REF_NAME is not a buildcage/<upstream tag> branch"
+            exit 1
+          fi
+          latest=$(git ls-remote --tags --refs https://github.com/SSLMate/go-pkcs12.git |
+            sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          if [ -z "$latest" ]; then
+            echo "::error::no release tag found upstream"
+            exit 1
+          fi
+          if [ "$(printf '%s\n%s\n' "$base" "$latest" | sort -V | tail -n 1)" = "$base" ]; then
+            echo "Based on $base, the latest upstream release."
+            exit 0
+          fi
+          title="Upstream released $latest (based on $base)"
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq length)
+          if [ "$open" -gt 0 ]; then
+            echo "Already tracked: $title"
+            exit 0
+          fi
+          body=$(printf '%s\n\n%s\n' \
+            "SSLMate/go-pkcs12 released $latest; this fork is based on $base. Create buildcage/$latest from the $latest tag, open a PR rebasing the patch onto it, then tag $latest-buildcage.1 and bump the replace in buildcage/docker." \
+            "https://github.com/SSLMate/go-pkcs12/compare/$base...$latest")
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
