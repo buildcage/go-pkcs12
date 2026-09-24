@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
 	"testing"
@@ -88,6 +89,108 @@ func TestTrustStore(t *testing.T) {
 		if decodedCerts[0].Subject.CommonName != commonName {
 			t.Errorf("expected common name to be %q, but found %q", commonName, decodedCerts[0].Subject.CommonName)
 		}
+	}
+}
+
+func TestTrustStoreEntries(t *testing.T) {
+	var certs []*x509.Certificate
+	for _, base64P12 := range testdata {
+		p12, _ := base64.StdEncoding.DecodeString(base64P12)
+		_, cert, err := Decode(p12, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		certs = append(certs, cert)
+	}
+	// A repeated name and a non-ASCII one both survive the round trip.
+	names := []string{"first", "first", "日本語 [jdk]"}
+	var entries []TrustStoreEntry
+	for i, cert := range certs {
+		entries = append(entries, TrustStoreEntry{Cert: cert, FriendlyName: names[i%len(names)]})
+	}
+
+	for name, tc := range map[string]struct {
+		enc      *Encoder
+		password string
+	}{
+		"Passwordless": {Passwordless, ""},
+		"LegacyRC2":    {LegacyRC2, "password"},
+		"Modern":       {Modern, "password"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pfxData, err := tc.enc.EncodeTrustStoreEntries(entries, tc.password)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			decoded, err := DecodeTrustStoreEntries(pfxData, tc.password)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(decoded) != len(entries) {
+				t.Fatalf("got %d entries, want %d", len(decoded), len(entries))
+			}
+			for i := range entries {
+				if !decoded[i].Cert.Equal(entries[i].Cert) {
+					t.Errorf("entry %d: certificate differs", i)
+				}
+				if decoded[i].FriendlyName != entries[i].FriendlyName {
+					t.Errorf("entry %d: got friendly name %q, want %q", i, decoded[i].FriendlyName, entries[i].FriendlyName)
+				}
+			}
+
+			certs, err := DecodeTrustStore(pfxData, tc.password)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(certs) != len(entries) {
+				t.Fatalf("DecodeTrustStore: got %d certs, want %d", len(certs), len(entries))
+			}
+		})
+	}
+}
+
+func TestSafeBagFriendlyName(t *testing.T) {
+	attribute := func(value asn1.RawValue) pkcs12Attribute {
+		encoded, err := asn1.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkcs12Attribute{
+			Id:    oidFriendlyName,
+			Value: asn1.RawValue{Tag: asn1.TagSet, IsCompound: true, Bytes: encoded},
+		}
+	}
+	bmp, err := bmpString("alias")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		attributes []pkcs12Attribute
+		want       string
+		wantErr    bool
+	}{
+		"no attributes":   {nil, "", false},
+		"other attribute": {[]pkcs12Attribute{{Id: oidLocalKeyID}}, "", false},
+		"a BMPString":     {[]pkcs12Attribute{attribute(asn1.RawValue{Tag: asn1.TagBMPString, Bytes: bmp})}, "alias", false},
+		"a UTF8String":    {[]pkcs12Attribute{attribute(asn1.RawValue{Tag: asn1.TagUTF8String, Bytes: []byte("alias")})}, "", true},
+		"odd-length BMP":  {[]pkcs12Attribute{attribute(asn1.RawValue{Tag: asn1.TagBMPString, Bytes: []byte{0}})}, "", true},
+		"not DER": {[]pkcs12Attribute{{
+			Id:    oidFriendlyName,
+			Value: asn1.RawValue{Tag: asn1.TagSet, IsCompound: true, Bytes: []byte{0x1e}},
+		}}, "", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bag := safeBag{Attributes: tc.attributes}
+			got, err := bag.friendlyName()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("got error %v, want error: %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
