@@ -5,6 +5,7 @@
 package pkcs12
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -147,6 +148,44 @@ func TestTrustStoreEntries(t *testing.T) {
 				t.Fatalf("DecodeTrustStore: got %d certs, want %d", len(certs), len(entries))
 			}
 		})
+	}
+}
+
+// DecodeTrustStore does not read Friendly Names, so a file whose name is
+// malformed still decodes through it, as it did before DecodeTrustStoreEntries
+// existed; DecodeTrustStoreEntries reports it.
+func TestTrustStoreMalformedFriendlyName(t *testing.T) {
+	p12, _ := base64.StdEncoding.DecodeString(testdata["Windows Azure Tools"])
+	_, cert, err := Decode(p12, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "malformed"
+	pfxData, err := Passwordless.EncodeTrustStoreEntries([]TrustStoreEntry{{Cert: cert, FriendlyName: name}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Retag the name's BMPString as a UTF8String. The file is passwordless, so
+	// the bag is in the clear and there is no MAC to break.
+	encoded, err := bmpString(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := bytes.Index(pfxData, append([]byte{asn1.TagBMPString, byte(len(encoded))}, encoded...))
+	if at < 0 {
+		t.Fatal("the friendly name is not in the file")
+	}
+	pfxData[at] = asn1.TagUTF8String
+
+	if _, err := DecodeTrustStoreEntries(pfxData, ""); err == nil {
+		t.Error("DecodeTrustStoreEntries accepted a malformed friendly name")
+	}
+	certs, err := DecodeTrustStore(pfxData, "")
+	if err != nil {
+		t.Fatalf("DecodeTrustStore: %v", err)
+	}
+	if len(certs) != 1 || !certs[0].Equal(cert) {
+		t.Errorf("DecodeTrustStore returned %d certs, want the one encoded", len(certs))
 	}
 }
 
