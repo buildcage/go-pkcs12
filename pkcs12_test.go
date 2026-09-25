@@ -13,6 +13,7 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"testing"
 )
 
@@ -360,4 +361,89 @@ SbFQoJvdT46iBg1TTatlltpOiH2mFaxWVS0xYjAjBgkqhkiG9w0BCRUxFgQUdA9eVqvETX4an/c8
 p8SsTugkit8wOwYJKoZIhvcNAQkUMS4eLABGAHIAaQBlAG4AZABsAHkAIABuAGEAbQBlACAAZgBv
 AHIAIABjAGUAcgB0MDEwITAJBgUrDgMCGgUABBRFsNz3Zd1O1GI8GTuFwCWuDOjEEwQIuBEfIcAy
 HQ8CAggA`,
+}
+
+func setMaxIterations(t *testing.T, max int) {
+	t.Helper()
+	old := MaxIterations
+	MaxIterations = max
+	t.Cleanup(func() { MaxIterations = old })
+}
+
+func testCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+	for _, base64P12 := range testdata {
+		p12, _ := base64.StdEncoding.DecodeString(base64P12)
+		_, cert, err := Decode(p12, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert
+	}
+	t.Fatal("no test data")
+	return nil
+}
+
+// Each case puts the larger count on one derivation only, so the cap is what
+// fails that one and not an earlier one.
+func TestMaxIterations(t *testing.T) {
+	cert := testCert(t)
+	for _, tc := range []struct {
+		name string
+		enc  Encoder
+	}{
+		{"legacy MAC", Encoder{macAlgorithm: oidSHA1, certAlgorithm: oidPBEWithSHAAnd3KeyTripleDESCBC, macIterations: 3000, encryptionIterations: 1, saltLen: 8}},
+		{"legacy PBE", Encoder{macAlgorithm: oidSHA1, certAlgorithm: oidPBEWithSHAAnd3KeyTripleDESCBC, macIterations: 1, encryptionIterations: 3000, saltLen: 8}},
+		{"PBES2", Encoder{macAlgorithm: oidSHA256, certAlgorithm: oidPBES2, macIterations: 1, encryptionIterations: 3000, saltLen: 16}},
+		{"PBMAC1", Encoder{macAlgorithm: oidPBMAC1, certAlgorithm: oidPBES2, macIterations: 3000, encryptionIterations: 1, saltLen: 16}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.enc.rand = rand.Reader
+			pfxData, err := tc.enc.EncodeTrustStore([]*x509.Certificate{cert}, "password")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			setMaxIterations(t, 2999)
+			if _, err := DecodeTrustStore(pfxData, "password"); !errors.Is(err, ErrTooManyIterations) {
+				t.Fatalf("expected ErrTooManyIterations, got %v", err)
+			}
+
+			for _, max := range []int{3000, 0} {
+				MaxIterations = max
+				if _, err := DecodeTrustStore(pfxData, "password"); err != nil {
+					t.Fatalf("MaxIterations %d: %v", max, err)
+				}
+			}
+		})
+	}
+}
+
+// PBKDF2 parameters hold the salt as a RawValue checked for its tag number
+// only, so a salt of another class still decodes. The cap reads the count
+// from the parsed parameters, so the salt's encoding does not hide it.
+func TestMaxIterationsContextSpecificSalt(t *testing.T) {
+	// No MAC, so the patch below leaves nothing to fail verification.
+	enc := Encoder{certAlgorithm: oidPBES2, encryptionIterations: 3000, saltLen: 16, rand: rand.Reader}
+	pfxData, err := enc.EncodeTrustStore([]*x509.Certificate{testCert(t)}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The PBKDF2 salt: a 16-byte OCTET STRING followed by the INTEGER 3000.
+	count := []byte{0x02, 0x02, 0x0b, 0xb8}
+	i := bytes.Index(pfxData, count) - 18
+	if i < 0 || pfxData[i] != 0x04 || pfxData[i+1] != 0x10 {
+		t.Fatal("PBKDF2 salt not found")
+	}
+	pfxData[i] = 0x84 // context-specific, tag number 4
+
+	setMaxIterations(t, 0)
+	if _, err := DecodeTrustStore(pfxData, ""); err != nil {
+		t.Fatalf("expected the patched salt to decode: %v", err)
+	}
+	MaxIterations = 2999
+	if _, err := DecodeTrustStore(pfxData, ""); !errors.Is(err, ErrTooManyIterations) {
+		t.Fatalf("expected ErrTooManyIterations, got %v", err)
+	}
 }
