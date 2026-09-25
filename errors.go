@@ -20,9 +20,9 @@ var (
 )
 
 // MaxIterations caps the iteration count of every key derivation, for the MAC
-// and for encryption alike. The count a file names is what decoding it runs,
-// so a file from an untrusted source can make a decode take days. Zero, the
-// default, means no cap.
+// and for encryption alike, when encoding as well as decoding. The count a
+// file names is what decoding it runs, so a file from an untrusted source can
+// make a decode take days. Zero, the default, means no cap.
 var MaxIterations int
 
 func checkIterations(iterations int) error {
