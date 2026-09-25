@@ -384,8 +384,7 @@ func testCert(t *testing.T) *x509.Certificate {
 	return nil
 }
 
-// Each case puts the larger count on one derivation only, so the cap is what
-// fails that one and not an earlier one.
+// Each case puts the larger count on one derivation only.
 func TestMaxIterations(t *testing.T) {
 	cert := testCert(t)
 	for _, tc := range []struct {
@@ -419,9 +418,7 @@ func TestMaxIterations(t *testing.T) {
 	}
 }
 
-// PBKDF2 parameters hold the salt as a RawValue checked for its tag number
-// only, so a salt of another class still decodes. The cap reads the count
-// from the parsed parameters, so the salt's encoding does not hide it.
+// A PBKDF2 salt of any class decodes, which must not hide the count after it.
 func TestMaxIterationsContextSpecificSalt(t *testing.T) {
 	// No MAC, so the patch below leaves nothing to fail verification.
 	enc := Encoder{certAlgorithm: oidPBES2, encryptionIterations: 3000, saltLen: 16, rand: rand.Reader}
